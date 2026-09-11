@@ -26,6 +26,7 @@ public class AllTests
         suite.addTestSuite(DTLSReassemblerTest.class);
         suite.addTestSuite(DTLSRecordNumberMaskTest.class);
         suite.addTestSuite(SpreadCertificateStatusTest.class);
+        suite.addTestSuite(TlsAEADCipherDTLS13Test.class);
 
         return new BCTestSetup(suite);
     }
