@@ -36,6 +36,7 @@ public class AllTests
         suite.addTestSuite(DTLSTranscriptHashTest.class);
         suite.addTestSuite(SpreadCertificateStatusTest.class);
         suite.addTestSuite(TlsAEADCipherDTLS13Test.class);
+        suite.addTestSuite(TlsCryptoParametersTest.class);
 
         return new BCTestSetup(suite);
     }
