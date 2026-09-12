@@ -25,6 +25,7 @@ public class AllTests
         suite.addTestSuite(CheckTlsFeaturesExtensionTest.class);
         suite.addTestSuite(DTLS13AckGenerationTest.class);
         suite.addTestSuite(DTLS13FlightTrackerTest.class);
+        suite.addTestSuite(DTLS13PostHandshakeTest.class);
         suite.addTestSuite(DTLS13RetransmissionTest.class);
         suite.addTestSuite(DTLS13UnifiedHeaderTest.class);
         suite.addTestSuite(DTLSAckTest.class);
