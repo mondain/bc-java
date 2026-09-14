@@ -1376,6 +1376,18 @@ class DTLSRecordLayer
         case ContentType.heartbeat:
         case ContentType.tls12_cid:
             break;
+        case ContentType.ack:
+            /*
+             * RFC 9147 4.1, 7. An ACK is a DTLSPlaintext record when sent at epoch 0, which a peer that has no
+             * protected epoch to send in yet does to acknowledge a fragmented ClientHello or ServerHello.
+             * Nothing before DTLS 1.3 sends one, so its arrival before DTLS 1.3 is known is treated like any
+             * other unknown content type. Once decoded it is delivered to the ACK listener like a protected ACK.
+             */
+            if (!dtls13)
+            {
+                return -1;
+            }
+            break;
         default:
             return -1;
         }
@@ -1402,7 +1414,8 @@ class DTLSRecordLayer
         }
         else if (null != retransmitEpochPlaintext && epoch == retransmitEpochPlaintext.getEpoch())
         {
-            if (recordType == ContentType.handshake)
+            // A retransmitted plaintext flight, or the peer's epoch-0 acknowledgement of part of ours
+            if (recordType == ContentType.handshake || recordType == ContentType.ack)
             {
                 recordEpoch = retransmitEpochPlaintext;
             }

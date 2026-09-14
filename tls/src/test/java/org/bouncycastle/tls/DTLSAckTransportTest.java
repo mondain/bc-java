@@ -4,6 +4,8 @@ import java.io.IOException;
 import java.util.Vector;
 
 import org.bouncycastle.tls.crypto.CryptoHashAlgorithm;
+import org.bouncycastle.tls.crypto.TlsCrypto;
+import org.bouncycastle.tls.crypto.impl.bc.BcTlsCrypto;
 import org.bouncycastle.util.Arrays;
 
 import junit.framework.TestCase;
@@ -261,5 +263,99 @@ public class DTLSAckTransportTest
         {
             assertEquals(AlertDescription.internal_error, e.getAlertDescription());
         }
+    }
+
+    /**
+     * RFC 9147 4.1 lists ack(26) among the content types of a DTLSPlaintext record, and section 7 has a peer
+     * with no protected epoch to send in yet - one that has received part of a fragmented ClientHello or
+     * ServerHello - acknowledge it at epoch 0. A record layer that only recognises ACK inside a DTLSCiphertext
+     * record drops every such acknowledgement unread and retransmits the whole flight on its timer instead.
+     * <p>
+     * The receiving side is a DTLS 1.3 record layer still reading at epoch 0, as a server is between its
+     * ServerHello flight and the client's first protected record, and the ACK arrives as a plaintext record.
+     * The epoch-0 filter still applies: a record number above the ACK's own epoch is discarded from it.
+     * </p>
+     */
+    public void testPlaintextAckAtEpochZeroIsDelivered() throws Exception
+    {
+        TlsCrypto crypto = new BcTlsCrypto();
+        DTLSRecordLayer13TestSupport.Queue c2s = new DTLSRecordLayer13TestSupport.Queue();
+        DTLSRecordLayer13TestSupport.Queue s2c = new DTLSRecordLayer13TestSupport.Queue();
+        AbstractTlsContext context = TlsAEADCipherDTLS13Test.createContext(crypto, true,
+            CipherSuite.TLS_AES_128_GCM_SHA256, CryptoHashAlgorithm.sha256, new byte[32], new byte[32]);
+        TlsPeer peer = new DefaultTlsClient(crypto)
+        {
+            public TlsAuthentication getAuthentication()
+            {
+                return null;
+            }
+        };
+        DTLSRecordLayer serverLayer = new DTLSRecordLayer(context, peer,
+            new DTLSRecordLayer13TestSupport.QueueTransport(c2s, s2c));
+        serverLayer.setWriteVersion(ProtocolVersion.DTLSv12);
+        serverLayer.setReadVersion(ProtocolVersion.DTLSv12);
+
+        RecordingAckListener listener = new RecordingAckListener();
+        serverLayer.setAckListener(listener);
+
+        // Puts the record layer into DTLS 1.3 mode (dtls13 == true) without moving the read epoch off epoch 0.
+        serverLayer.initPendingEpoch(TlsUtils.initCipher(context));
+        assertEquals(0, serverLayer.getReadEpoch());
+
+        Vector recordNumbers = new Vector();
+        recordNumbers.addElement(new DTLSRecordNumber(0, 7));
+        // above the ACK's own epoch: discarded by the epoch-0 filter, not delivered
+        recordNumbers.addElement(new DTLSRecordNumber(2, 1));
+        byte[] body = DTLSAck.encode(recordNumbers);
+
+        // RFC 9147 4. DTLSPlaintext: type, legacy_record_version, epoch, sequence_number, length
+        byte[] record = new byte[13 + body.length];
+        record[0] = (byte)ContentType.ack;
+        TlsUtils.writeVersion(ProtocolVersion.DTLSv12, record, 1);
+        TlsUtils.writeUint16(0, record, 3);
+        TlsUtils.writeUint48(3, record, 5);
+        TlsUtils.writeUint16(body.length, record, 11);
+        System.arraycopy(body, 0, record, 13, body.length);
+        c2s.put(record);
+
+        byte[] buf = new byte[serverLayer.getReceiveLimit()];
+        assertEquals("an ACK carries no application data", -1, serverLayer.receive(buf, 0, buf.length, 500));
+
+        assertEquals("the plaintext ACK must be delivered to the listener", 1, listener.received.size());
+        Vector delivered = (Vector)listener.received.elementAt(0);
+        assertEquals("only the epoch-0 record number survives the epoch-0 filter", 1, delivered.size());
+        assertEquals(new DTLSRecordNumber(0, 7), delivered.elementAt(0));
+    }
+
+    /**
+     * The counterpart: before DTLS 1.3 has been selected nothing sends ACKs (RFC 9147 7, and
+     * draft-ietf-tls-rfc9147bis makes the receiver ignore any that arrive), so a plaintext ACK reaching a
+     * record layer that is not yet in DTLS 1.3 mode is discarded like any unknown content type.
+     */
+    public void testPlaintextAckBeforeDTLS13IsSelectedIsIgnored() throws Exception
+    {
+        DTLSRecordLayer13TestSupport support = new DTLSRecordLayer13TestSupport();
+        DTLSRecordLayer legacyLayer = support.setUpLegacyLayer();
+
+        RecordingAckListener listener = new RecordingAckListener();
+        legacyLayer.setAckListener(listener);
+
+        Vector recordNumbers = new Vector();
+        recordNumbers.addElement(new DTLSRecordNumber(0, 1));
+        byte[] body = DTLSAck.encode(recordNumbers);
+
+        byte[] record = new byte[13 + body.length];
+        record[0] = (byte)ContentType.ack;
+        TlsUtils.writeVersion(ProtocolVersion.DTLSv12, record, 1);
+        TlsUtils.writeUint16(0, record, 3);
+        TlsUtils.writeUint48(0, record, 5);
+        TlsUtils.writeUint16(body.length, record, 11);
+        System.arraycopy(body, 0, record, 13, body.length);
+
+        support.deliverToLegacyLayer(record);
+
+        byte[] buf = new byte[legacyLayer.getReceiveLimit()];
+        assertEquals(-1, legacyLayer.receive(buf, 0, buf.length, 500));
+        assertEquals("no ACK may be processed before DTLS 1.3 is selected", 0, listener.received.size());
     }
 }
