@@ -211,9 +211,12 @@ public final class Tls13NullCipher
     private void setupHmac(TlsHMAC hmac, byte[] nonce, TlsSecret secret, int cryptoHashAlgorithm)
         throws IOException
     {
+        // RFC 9147 5.9. DTLS 1.3 derives with the "dtls13" label prefix rather than TLS 1.3's "tls13 ".
+        boolean isDTLS = cryptoParams.getSecurityParameters().getNegotiatedVersion().isDTLS();
+
         int length = hmac.getMacLength();
-        byte[] key = hkdfExpandLabel(secret, cryptoHashAlgorithm, "key", length).extract();
-        byte[] iv = hkdfExpandLabel(secret, cryptoHashAlgorithm, "iv", length).extract();
+        byte[] key = hkdfExpandLabel(secret, cryptoHashAlgorithm, "key", length, isDTLS).extract();
+        byte[] iv = hkdfExpandLabel(secret, cryptoHashAlgorithm, "iv", length, isDTLS).extract();
 
         hmac.setKey(key, 0, length);
         System.arraycopy(iv, 0, nonce, 0, length);
@@ -241,9 +244,10 @@ public final class Tls13NullCipher
         return additional_data;
     }
 
-    private static TlsSecret hkdfExpandLabel(TlsSecret secret, int cryptoHashAlgorithm, String label, int length)
-        throws IOException
+    private static TlsSecret hkdfExpandLabel(TlsSecret secret, int cryptoHashAlgorithm, String label, int length,
+        boolean isDTLS) throws IOException
     {
-        return TlsCryptoUtils.hkdfExpandLabel(secret, cryptoHashAlgorithm, label, TlsUtils.EMPTY_BYTES, length);
+        return TlsCryptoUtils.hkdfExpandLabel(secret, cryptoHashAlgorithm, label, TlsUtils.EMPTY_BYTES, length,
+            isDTLS);
     }
 }
