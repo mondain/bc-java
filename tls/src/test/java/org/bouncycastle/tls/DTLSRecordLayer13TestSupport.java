@@ -198,12 +198,22 @@ class DTLSRecordLayer13TestSupport
         return new Side(context, recordLayer);
     }
 
+    /** The inbound queue of the layer built by {@link #setUpLegacyLayer()}. */
+    private Queue legacyInbound;
+
+    /** Puts a datagram on the inbound queue of the layer built by {@link #setUpLegacyLayer()}. */
+    void deliverToLegacyLayer(byte[] datagram)
+    {
+        legacyInbound.put(datagram);
+    }
+
     /** A DTLS 1.2 record layer, built the way {@code testLegacyHeaderPlaintextStillAcceptedAtEpochZero} does. */
     DTLSRecordLayer setUpLegacyLayer() throws IOException
     {
         TlsCrypto crypto = new BcTlsCrypto();
         Queue c2s = new Queue();
         Queue s2c = new Queue();
+        this.legacyInbound = c2s;
         AbstractTlsContext context = TlsAEADCipherDTLS13Test.createContext(crypto, true,
             CipherSuite.TLS_AES_128_GCM_SHA256, CryptoHashAlgorithm.sha256, new byte[32], new byte[32]);
         TlsPeer peer = new DefaultTlsClient(crypto)

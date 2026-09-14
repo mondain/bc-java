@@ -671,7 +671,12 @@ public class DTLSServerProtocol
 
         ClientHello clientHello = state.clientHello;
 
-        byte[] legacy_session_id = clientHello.getSessionID();
+        /*
+         * RFC 9147 5 (and draft-ietf-tls-rfc9147bis): "DTLS servers MUST NOT echo the legacy_session_id value
+         * from the client and MUST send an empty legacy_session_id_echo" - even when the client offered one,
+         * which it may still do with a session cached from a DTLS 1.2 server.
+         */
+        byte[] legacy_session_id = TlsUtils.EMPTY_BYTES;
 
         Hashtable clientHelloExtensions = clientHello.getExtensions();
         if (null == clientHelloExtensions)
@@ -979,7 +984,8 @@ public class DTLSServerProtocol
          * RFC 9147 5.3. 'legacy_version' is 0xFEFD (DTLS 1.2), not the TLS 1.3 value, and the selected
          * version travels in "supported_versions".
          */
-        ServerHello helloRetryRequest = new ServerHello(ProtocolVersion.DTLSv12, state.clientHello.getSessionID(),
+        // RFC 9147 5. legacy_session_id_echo is empty for DTLS 1.3, in a HelloRetryRequest as in a ServerHello.
+        ServerHello helloRetryRequest = new ServerHello(ProtocolVersion.DTLSv12, TlsUtils.EMPTY_BYTES,
             securityParameters.getCipherSuite(), serverHelloExtensions);
 
         state.helloRetryRequestSent = true;
@@ -1002,8 +1008,8 @@ public class DTLSServerProtocol
      * </p>
      * <p>
      * RFC 9147 5.3. The ClientHello's 'legacy_cookie' field exists for backwards compatibility with the DTLS
-     * 1.2 HelloVerifyRequest exchange and MUST be ignored by a DTLS 1.3 server, so it is not looked at here
-     * or anywhere on the 1.3 path.
+     * 1.2 HelloVerifyRequest exchange; a DTLS 1.3 ClientHello MUST leave it empty, which generateServerHello
+     * checks when it selects DTLS 1.3. It is not looked at again here.
      * </p>
      */
     protected void processClientHelloRetry(ServerHandshakeState state, byte[] body)
@@ -1194,6 +1200,21 @@ public class DTLSServerProtocol
             {
                 throw new TlsFatalAlert(AlertDescription.internal_error,
                     "DTLS 1.3 cannot be negotiated behind a HelloVerifyRequest front end");
+            }
+
+            /*
+             * RFC 9147 5.3. "legacy_cookie: ... MUST be set to a zero-length vector (i.e., a single zero
+             * byte length field). If a DTLS 1.3 ClientHello is received with any other value in this field,
+             * the server MUST abort the handshake with an 'illegal_parameter' alert."
+             *
+             * Checked after the HelloVerifyRequest refusal above: a ClientHello answering a HelloVerifyRequest
+             * legitimately carries that cookie, and the more useful diagnostic there is the one naming the
+             * front end.
+             */
+            if (state.clientHello.getCookie().length > 0)
+            {
+                throw new TlsFatalAlert(AlertDescription.illegal_parameter,
+                    "Non-empty legacy_cookie in a DTLS 1.3 ClientHello");
             }
 
             /*

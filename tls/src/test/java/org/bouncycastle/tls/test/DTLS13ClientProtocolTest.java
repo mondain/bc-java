@@ -44,6 +44,29 @@ public class DTLS13ClientProtocolTest
      * Reaching that check at all proves the client routed the ServerHello into its DTLS 1.3 path: the DTLS
      * 1.2 path has no such requirement and would have gone on to look for a ServerKeyExchange.
      */
+    /**
+     * RFC 9147 5 (and draft-ietf-tls-rfc9147bis): "DTLS 1.3 clients MUST abort the handshake with an
+     * 'illegal_parameter' alert if the field is not empty" - the field being legacy_session_id_echo, which a
+     * DTLS 1.3 server MUST leave empty whatever the client put in legacy_session_id. The scripted ServerHello
+     * echoes a 4-byte value.
+     */
+    public void testDTLSv13ServerHelloWithNonEmptyLegacySessionIdEchoRejected() throws Exception
+    {
+        byte[] echo = new byte[]{ 1, 2, 3, 4 };
+        ScriptedServerHelloTransport transport = new ScriptedServerHelloTransport(
+            new byte[][]{ createServerHelloRecord(new byte[]{ (byte)0xFE, (byte)0xFC }, echo, 0, 0) });
+
+        TlsFatalAlert fatalAlert = connectAndExpectFatalAlert(transport, ProtocolVersion.DTLSv13.only());
+
+        assertEquals("alert for a non-empty legacy_session_id_echo", AlertDescription.illegal_parameter,
+            fatalAlert.getAlertDescription());
+
+        // The scripted ServerHello also has no key_share, which raises the same alert later; pin the check.
+        assertEquals("the legacy_session_id_echo check must be the one that raised it",
+            "illegal_parameter(47); Non-empty legacy_session_id_echo in a DTLS 1.3 ServerHello",
+            fatalAlert.getMessage());
+    }
+
     public void testDTLSv13ServerHelloWithoutKeyShare() throws Exception
     {
         short alertDescription = connectAndExpectFatalAlert(new byte[]{ (byte)0xFE, (byte)0xFC });
@@ -175,6 +198,15 @@ public class DTLS13ClientProtocolTest
     private static byte[] createServerHelloRecord(byte[] selectedVersion, int messageSeq, long recordSeq)
         throws IOException
     {
+        return createServerHelloRecord(selectedVersion, new byte[0], messageSeq, recordSeq);
+    }
+
+    /**
+     * As {@link #createServerHelloRecord(byte[], int, long)}, with the given legacy_session_id_echo.
+     */
+    private static byte[] createServerHelloRecord(byte[] selectedVersion, byte[] legacySessionIdEcho,
+        int messageSeq, long recordSeq) throws IOException
+    {
         ByteArrayOutputStream extensions = new ByteArrayOutputStream();
         writeUint16(extensions, ExtensionType.supported_versions);
         writeUint16(extensions, selectedVersion.length);
@@ -191,8 +223,9 @@ public class DTLS13ClientProtocolTest
         {
             body.write(i);
         }
-        // legacy_session_id_echo: the client offered none
-        body.write(0);
+        // legacy_session_id_echo
+        body.write(legacySessionIdEcho.length);
+        body.write(legacySessionIdEcho, 0, legacySessionIdEcho.length);
         writeUint16(body, CipherSuite.TLS_AES_128_GCM_SHA256);
         // legacy_compression_method
         body.write(0);

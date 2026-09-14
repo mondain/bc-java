@@ -980,10 +980,16 @@ public class DTLSClientProtocol
         // NOTE: legacy_compression_method checked during ServerHello parsing
 
         if (!ProtocolVersion.DTLSv12.equals(legacy_version) ||
-            !Arrays.areEqual(state.clientHello.getSessionID(), legacy_session_id_echo) ||
             !TlsUtils.isValidCipherSuiteSelection(state.clientHello.getCipherSuites(), cipherSuite))
         {
             throw new TlsFatalAlert(AlertDescription.illegal_parameter);
+        }
+
+        // RFC 9147 5. As for the ServerHello: legacy_session_id_echo MUST be empty.
+        if (legacy_session_id_echo.length > 0)
+        {
+            throw new TlsFatalAlert(AlertDescription.illegal_parameter,
+                "Non-empty legacy_session_id_echo in a DTLS 1.3 HelloRetryRequest");
         }
 
         Hashtable extensions = helloRetryRequest.getExtensions();
@@ -1182,10 +1188,21 @@ public class DTLSClientProtocol
         int cipherSuite = serverHello.getCipherSuite();
         // NOTE: legacy_compression_method checked during ServerHello parsing
 
-        if (!ProtocolVersion.DTLSv12.equals(legacy_version) ||
-            !Arrays.areEqual(state.clientHello.getSessionID(), legacy_session_id_echo))
+        if (!ProtocolVersion.DTLSv12.equals(legacy_version))
         {
             throw new TlsFatalAlert(AlertDescription.illegal_parameter);
+        }
+
+        /*
+         * RFC 9147 5 (and draft-ietf-tls-rfc9147bis): the server MUST NOT echo the client's legacy_session_id,
+         * and a client "MUST abort the handshake with an 'illegal_parameter' alert if the field is not empty" -
+         * whatever the client itself sent, since a session cached from a DTLS 1.2 server may have put a
+         * non-empty value in the ClientHello.
+         */
+        if (legacy_session_id_echo.length > 0)
+        {
+            throw new TlsFatalAlert(AlertDescription.illegal_parameter,
+                "Non-empty legacy_session_id_echo in a DTLS 1.3 ServerHello");
         }
 
         Hashtable extensions = serverHello.getExtensions();
