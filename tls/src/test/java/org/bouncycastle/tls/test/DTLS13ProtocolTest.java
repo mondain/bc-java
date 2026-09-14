@@ -37,6 +37,9 @@ import org.bouncycastle.tls.TlsSRTPUtils;
 import org.bouncycastle.tls.TlsServer;
 import org.bouncycastle.tls.TlsServerCertificate;
 import org.bouncycastle.tls.TlsUtils;
+import org.bouncycastle.tls.crypto.impl.bc.BcTlsCrypto;
+import org.bouncycastle.tls.TlsSession;
+import org.bouncycastle.tls.SessionParameters;
 import org.bouncycastle.tls.UseSRTPData;
 import org.bouncycastle.tls.crypto.TlsCrypto;
 import org.bouncycastle.tls.crypto.TlsStreamSigner;
@@ -970,6 +973,81 @@ public class DTLS13ProtocolTest
      * of the echoed cookie is flipped on the path, so the client is well-behaved and only the server's check
      * can catch it.
      */
+    /**
+     * RFC 9147 5 (and draft-ietf-tls-rfc9147bis): "DTLS servers MUST NOT echo the legacy_session_id value from
+     * the client and MUST send an empty legacy_session_id_echo", including when the ClientHello's
+     * legacy_session_id is non-empty because of a session cached from a DTLS 1.2 server - the case here. The
+     * client offers DTLS 1.2 as well, so the cached session is offered, and DTLS 1.3 is what the server picks.
+     */
+    public void testServerSendsEmptyLegacySessionIdEcho() throws Exception
+    {
+        byte[] sessionID = new byte[32];
+        for (int i = 0; i < sessionID.length; ++i)
+        {
+            sessionID[i] = (byte)(0xA0 + i);
+        }
+
+        TlsCrypto crypto = new BcTlsCrypto();
+        SessionParameters sessionParameters = new SessionParameters.Builder()
+            .setCipherSuite(CipherSuite.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256)
+            .setExtendedMasterSecret(true)
+            .setMasterSecret(crypto.createSecret(new byte[48]))
+            .setNegotiatedVersion(ProtocolVersion.DTLSv12)
+            .build();
+
+        Harness harness = new Harness();
+        harness.clientVersions = ProtocolVersion.DTLSv13.downTo(ProtocolVersion.DTLSv12);
+        harness.clientSession = TlsUtils.importSession(sessionID, sessionParameters);
+        harness.run(16);
+
+        assertEquals("client negotiated version", ProtocolVersion.DTLSv13, harness.clientVersion);
+        assertEquals("server negotiated version", ProtocolVersion.DTLSv13, harness.serverVersion);
+
+        Vector clientHellos = handshakeBodies(harness.clientRecords(), HandshakeType.client_hello);
+        Vector serverHellos = handshakeBodies(harness.serverRecords(), HandshakeType.server_hello);
+        assertFalse("no ClientHello captured", clientHellos.isEmpty());
+        assertFalse("no ServerHello captured", serverHellos.isEmpty());
+
+        // The test is only meaningful if the client really offered the cached session's ID
+        assertTrue("the ClientHello did not carry the cached session's legacy_session_id",
+            Arrays.areEqual(sessionID, helloSessionID((byte[])clientHellos.elementAt(0))));
+
+        assertEquals("legacy_session_id_echo must be empty in a DTLS 1.3 ServerHello", 0,
+            helloSessionID((byte[])serverHellos.elementAt(0)).length);
+    }
+
+    /**
+     * RFC 9147 5.3. "If a DTLS 1.3 ClientHello is received with any other value in this field [legacy_cookie],
+     * the server MUST abort the handshake with an 'illegal_parameter' alert." A conforming client never sends
+     * one, so it is injected on the path.
+     */
+    public void testClientHelloWithLegacyCookieRejected() throws Exception
+    {
+        Harness harness = new Harness();
+        harness.injectFirstClientHelloCookie = true;
+        harness.expectServerAbort = true;
+
+        try
+        {
+            harness.run(16);
+
+            fail("expected the server to abort on a non-empty legacy_cookie");
+        }
+        catch (Exception e)
+        {
+            // The client's side of the failure: an alert received, or a timeout if the alert was lost
+        }
+
+        assertTrue("the ClientHello was never rewritten", harness.mangled > 0);
+        assertNotNull("the server must be the side that aborted", harness.serverAbort);
+        assertTrue("server abort: " + harness.serverAbort, harness.serverAbort instanceof TlsFatalAlert);
+        assertEquals("alert for a non-empty legacy_cookie", AlertDescription.illegal_parameter,
+            ((TlsFatalAlert)harness.serverAbort).getAlertDescription());
+        assertEquals("the legacy_cookie check must be the one that raised it",
+            "illegal_parameter(47); Non-empty legacy_cookie in a DTLS 1.3 ClientHello",
+            harness.serverAbort.getMessage());
+    }
+
     public void testSecondClientHelloWithAMangledCookieRejected() throws Exception
     {
         Harness harness = new Harness();
@@ -1652,6 +1730,53 @@ public class DTLS13ProtocolTest
      * The offset within the datagram of the body of the first ClientHello it carries, or -1 if it carries
      * none. Only unprotected plaintext records are walked: a ClientHello is never anything else.
      */
+    /**
+     * A copy of the datagram in which the (unfragmented, first-in-datagram) ClientHello whose body starts at
+     * 'bodyOffset' carries a 4-byte legacy_cookie instead of an empty one, with the record length, handshake
+     * message length and fragment_length adjusted to match.
+     */
+    private static byte[] injectLegacyCookie(byte[] buf, int off, int len, int bodyOffset)
+    {
+        byte[] cookie = new byte[]{ (byte)0xC0, (byte)0x0C, (byte)0x1E, (byte)0x5A };
+
+        byte[] datagram = Arrays.copyOfRange(buf, off, off + len);
+
+        // legacy_version(2) random(32) legacy_session_id<0..32>
+        int cookieLengthOffset = bodyOffset + 2 + 32;
+        cookieLengthOffset += 1 + (datagram[cookieLengthOffset] & 0xFF);
+
+        if (0 != (datagram[cookieLengthOffset] & 0xFF))
+        {
+            throw new IllegalStateException("the client's ClientHello already carries a legacy_cookie");
+        }
+
+        byte[] result = new byte[datagram.length + cookie.length];
+        System.arraycopy(datagram, 0, result, 0, cookieLengthOffset + 1);
+        result[cookieLengthOffset] = (byte)cookie.length;
+        System.arraycopy(cookie, 0, result, cookieLengthOffset + 1, cookie.length);
+        System.arraycopy(datagram, cookieLengthOffset + 1, result, cookieLengthOffset + 1 + cookie.length,
+            datagram.length - (cookieLengthOffset + 1));
+
+        int recordOffset = bodyOffset - MESSAGE_HEADER_LENGTH - PLAINTEXT_HEADER_LENGTH;
+        int messageOffset = bodyOffset - MESSAGE_HEADER_LENGTH;
+
+        // DTLSPlaintext.length
+        TlsUtils.writeUint16(readUint16(result, recordOffset + 11) + cookie.length, result, recordOffset + 11);
+        // Handshake.length and fragment_length (fragment_offset stays 0)
+        TlsUtils.writeUint24(readUint24(result, messageOffset + 1) + cookie.length, result, messageOffset + 1);
+        TlsUtils.writeUint24(readUint24(result, messageOffset + 9) + cookie.length, result, messageOffset + 9);
+
+        return result;
+    }
+
+    /** The legacy_session_id of a ClientHello body, or the legacy_session_id_echo of a ServerHello body. */
+    private static byte[] helloSessionID(byte[] body)
+    {
+        int pos = 2 + 32;
+        int length = body[pos] & 0xFF;
+        return Arrays.copyOfRange(body, pos + 1, pos + 1 + length);
+    }
+
     private static int findClientHelloBodyOffset(byte[] buf, int off, int len)
     {
         int pos = off;
@@ -2047,6 +2172,19 @@ public class DTLS13ProtocolTest
         boolean expectServerAbort = false;
 
         /*
+         * RFC 9147 5. A session the client tries to resume, which puts its (non-empty) session ID in the
+         * ClientHello's legacy_session_id. A DTLS 1.3 server must not echo it back.
+         */
+        TlsSession clientSession = null;
+
+        /*
+         * RFC 9147 5.3. Rewrites the first ClientHello on the path so that its legacy_cookie is non-empty, which
+         * a DTLS 1.3 server must refuse. The client itself always sends it empty, so only the path can produce
+         * this.
+         */
+        boolean injectFirstClientHelloCookie = false;
+
+        /*
          * RFC 9147 8. The post-handshake key update a run performs, and whether the datagram carrying the
          * client's KeyUpdate is dropped on its way out. The drop is deterministic and counted, rather than a
          * seeded loss rate, so that the message under test is certainly the one that was lost.
@@ -2202,7 +2340,7 @@ public class DTLS13ProtocolTest
 
         void run(int dataLength) throws Exception
         {
-            MockDTLSClient client = new MockDTLSClient(null)
+            MockDTLSClient client = new MockDTLSClient(clientSession)
             {
                 protected ProtocolVersion[] getSupportedVersions()
                 {
@@ -2563,6 +2701,7 @@ public class DTLS13ProtocolTest
             recording.holdFirstEpoch2Datagram = holdFirstClientEpoch2Datagram;
             recording.replaySecondHelloRetryRequest = replaySecondHelloRetryRequest;
             recording.mangleSecondClientHello = mangleSecondClientHello;
+            recording.injectFirstClientHelloCookie = injectFirstClientHelloCookie;
 
             try
             {
@@ -3131,6 +3270,7 @@ public class DTLS13ProtocolTest
         boolean dropNextDatagram = false;
         boolean replaySecondHelloRetryRequest = false;
         int mangleSecondClientHello = MANGLE_NONE;
+        boolean injectFirstClientHelloCookie = false;
 
         private byte[] held = null;
         private byte[] capturedHelloRetryRequest = null;
@@ -3256,6 +3396,21 @@ public class DTLS13ProtocolTest
                 System.out.println("DTLS 1.3 test: dropped the client's " + len
                     + " byte post-handshake datagram");
                 return;
+            }
+
+            if (injectFirstClientHelloCookie)
+            {
+                int clientHelloBodyOffset = findClientHelloBodyOffset(buf, off, len);
+                if (clientHelloBodyOffset >= 0)
+                {
+                    byte[] datagram = injectLegacyCookie(buf, off, len, clientHelloBodyOffset - off);
+                    ++mangled;
+
+                    System.out.println("DTLS 1.3 test: injected a legacy_cookie into the ClientHello");
+
+                    transport.send(datagram, 0, datagram.length);
+                    return;
+                }
             }
 
             if (replaySecondHelloRetryRequest || MANGLE_NONE != mangleSecondClientHello)
