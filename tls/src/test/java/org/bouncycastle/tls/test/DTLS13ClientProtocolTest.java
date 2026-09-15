@@ -40,11 +40,6 @@ public class DTLS13ClientProtocolTest
     }
 
     /**
-     * A DTLS 1.3 ServerHello with no "key_share" and no pre-shared key is illegal (RFC 8446 4.1.3/4.2.8).
-     * Reaching that check at all proves the client routed the ServerHello into its DTLS 1.3 path: the DTLS
-     * 1.2 path has no such requirement and would have gone on to look for a ServerKeyExchange.
-     */
-    /**
      * RFC 9147 5 (and draft-ietf-tls-rfc9147bis): "DTLS 1.3 clients MUST abort the handshake with an
      * 'illegal_parameter' alert if the field is not empty" - the field being legacy_session_id_echo, which a
      * DTLS 1.3 server MUST leave empty whatever the client put in legacy_session_id. The scripted ServerHello
@@ -67,6 +62,11 @@ public class DTLS13ClientProtocolTest
             fatalAlert.getMessage());
     }
 
+    /**
+     * A DTLS 1.3 ServerHello with no "key_share" and no pre-shared key is illegal (RFC 8446 4.1.3/4.2.8).
+     * Reaching that check at all proves the client routed the ServerHello into its DTLS 1.3 path: the DTLS
+     * 1.2 path has no such requirement and would have gone on to look for a ServerKeyExchange.
+     */
     public void testDTLSv13ServerHelloWithoutKeyShare() throws Exception
     {
         short alertDescription = connectAndExpectFatalAlert(new byte[]{ (byte)0xFE, (byte)0xFC });

@@ -24,6 +24,7 @@ import org.bouncycastle.tls.NamedGroup;
 import org.bouncycastle.tls.ProtocolVersion;
 import org.bouncycastle.tls.SRTPProtectionProfile;
 import org.bouncycastle.tls.SecurityParameters;
+import org.bouncycastle.tls.SessionParameters;
 import org.bouncycastle.tls.SignatureAlgorithm;
 import org.bouncycastle.tls.SignatureAndHashAlgorithm;
 import org.bouncycastle.tls.TlsAuthentication;
@@ -36,13 +37,12 @@ import org.bouncycastle.tls.TlsFatalAlertReceived;
 import org.bouncycastle.tls.TlsSRTPUtils;
 import org.bouncycastle.tls.TlsServer;
 import org.bouncycastle.tls.TlsServerCertificate;
-import org.bouncycastle.tls.TlsUtils;
-import org.bouncycastle.tls.crypto.impl.bc.BcTlsCrypto;
 import org.bouncycastle.tls.TlsSession;
-import org.bouncycastle.tls.SessionParameters;
+import org.bouncycastle.tls.TlsUtils;
 import org.bouncycastle.tls.UseSRTPData;
 import org.bouncycastle.tls.crypto.TlsCrypto;
 import org.bouncycastle.tls.crypto.TlsStreamSigner;
+import org.bouncycastle.tls.crypto.impl.bc.BcTlsCrypto;
 import org.bouncycastle.util.Arrays;
 import org.bouncycastle.util.Strings;
 
@@ -168,6 +168,8 @@ public class DTLS13ProtocolTest
     private static final int MANGLE_NONE = 0;
     private static final int MANGLE_COOKIE = 1;
     private static final int MANGLE_RANDOM = 2;
+    /** Insert a non-empty legacy_cookie into the second ClientHello (RFC 9147 5.3 forbids one in DTLS 1.3). */
+    private static final int MANGLE_LEGACY_COOKIE = 3;
 
     /**
      * The plain baseline: a certificate-based DTLS 1.3 handshake with no CertificateRequest at all, which is
@@ -968,12 +970,6 @@ public class DTLS13ProtocolTest
     }
 
     /**
-     * RFC 8446 4.2.2. The second ClientHello must echo the cookie exactly, and a server that accepted anything
-     * else would have no way to tell its own HelloRetryRequest's answer from an unrelated ClientHello. One byte
-     * of the echoed cookie is flipped on the path, so the client is well-behaved and only the server's check
-     * can catch it.
-     */
-    /**
      * RFC 9147 5 (and draft-ietf-tls-rfc9147bis): "DTLS servers MUST NOT echo the legacy_session_id value from
      * the client and MUST send an empty legacy_session_id_echo", including when the ClientHello's
      * legacy_session_id is non-empty because of a session cached from a DTLS 1.2 server - the case here. The
@@ -1048,6 +1044,46 @@ public class DTLS13ProtocolTest
             harness.serverAbort.getMessage());
     }
 
+    /**
+     * The same rule for the second ClientHello, the one answering a HelloRetryRequest: RFC 9147 5.3 covers any
+     * DTLS 1.3 ClientHello, and processClientHelloRetry replaces the first ClientHello with this one. The
+     * legacy_cookie is inserted on the path, so the well-behaved client's own cookie extension echo is intact
+     * and only the legacy field can be what the server refuses.
+     */
+    public void testSecondClientHelloWithLegacyCookieRejected() throws Exception
+    {
+        Harness harness = new Harness();
+        harness.forceHelloRetryRequest = true;
+        harness.mangleSecondClientHello = MANGLE_LEGACY_COOKIE;
+        harness.expectServerAbort = true;
+
+        try
+        {
+            harness.run(16);
+
+            fail("expected the server to abort on a non-empty legacy_cookie in the second ClientHello");
+        }
+        catch (Exception e)
+        {
+            // The client's side of the failure: an alert received, or a timeout if the alert was lost
+        }
+
+        assertTrue("the second ClientHello was never rewritten", harness.mangled > 0);
+        assertNotNull("the server must be the side that aborted", harness.serverAbort);
+        assertTrue("server abort: " + harness.serverAbort, harness.serverAbort instanceof TlsFatalAlert);
+        assertEquals("alert for a non-empty legacy_cookie", AlertDescription.illegal_parameter,
+            ((TlsFatalAlert)harness.serverAbort).getAlertDescription());
+        assertEquals("the legacy_cookie check must be the one that raised it",
+            "illegal_parameter(47); Non-empty legacy_cookie in a DTLS 1.3 ClientHello",
+            harness.serverAbort.getMessage());
+    }
+
+    /**
+     * RFC 8446 4.2.2. The second ClientHello must echo the cookie exactly, and a server that accepted anything
+     * else would have no way to tell its own HelloRetryRequest's answer from an unrelated ClientHello. One byte
+     * of the echoed cookie is flipped on the path, so the client is well-behaved and only the server's check
+     * can catch it.
+     */
     public void testSecondClientHelloWithAMangledCookieRejected() throws Exception
     {
         Harness harness = new Harness();
@@ -1727,10 +1763,6 @@ public class DTLS13ProtocolTest
     }
 
     /**
-     * The offset within the datagram of the body of the first ClientHello it carries, or -1 if it carries
-     * none. Only unprotected plaintext records are walked: a ClientHello is never anything else.
-     */
-    /**
      * A copy of the datagram in which the (unfragmented, first-in-datagram) ClientHello whose body starts at
      * 'bodyOffset' carries a 4-byte legacy_cookie instead of an empty one, with the record length, handshake
      * message length and fragment_length adjusted to match.
@@ -1777,6 +1809,10 @@ public class DTLS13ProtocolTest
         return Arrays.copyOfRange(body, pos + 1, pos + 1 + length);
     }
 
+    /**
+     * The offset within the datagram of the body of the first ClientHello it carries, or -1 if it carries
+     * none. Only unprotected plaintext records are walked: a ClientHello is never anything else.
+     */
     private static int findClientHelloBodyOffset(byte[] buf, int off, int len)
     {
         int pos = off;
@@ -3454,6 +3490,17 @@ public class DTLS13ProtocolTest
                     {
                         byte[] datagram = Arrays.copyOfRange(buf, off, off + len);
                         int bodyOffset = clientHelloBodyOffset - off;
+
+                        if (MANGLE_LEGACY_COOKIE == mangleSecondClientHello)
+                        {
+                            datagram = injectLegacyCookie(datagram, 0, datagram.length, bodyOffset);
+                            ++mangled;
+
+                            System.out.println("DTLS 1.3 test: injected a legacy_cookie into the second ClientHello");
+
+                            transport.send(datagram, 0, datagram.length);
+                            return;
+                        }
 
                         int target = MANGLE_COOKIE == mangleSecondClientHello
                             ? clientHelloCookieValueOffset(datagram, bodyOffset)
