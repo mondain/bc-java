@@ -1008,8 +1008,8 @@ public class DTLSServerProtocol
      * </p>
      * <p>
      * RFC 9147 5.3. The ClientHello's 'legacy_cookie' field exists for backwards compatibility with the DTLS
-     * 1.2 HelloVerifyRequest exchange; a DTLS 1.3 ClientHello MUST leave it empty, which generateServerHello
-     * checks when it selects DTLS 1.3. It is not looked at again here.
+     * 1.2 HelloVerifyRequest exchange; any DTLS 1.3 ClientHello MUST leave it empty. generateServerHello checks
+     * the first when it selects DTLS 1.3, and the second is checked here.
      * </p>
      */
     protected void processClientHelloRetry(ServerHandshakeState state, byte[] body)
@@ -1036,6 +1036,13 @@ public class DTLSServerProtocol
         if (null == clientHello.getExtensions())
         {
             throw new TlsFatalAlert(AlertDescription.missing_extension);
+        }
+
+        // RFC 9147 5.3. As for the first ClientHello (see generateServerHello): legacy_cookie MUST be empty.
+        if (clientHello.getCookie().length > 0)
+        {
+            throw new TlsFatalAlert(AlertDescription.illegal_parameter,
+                "Non-empty legacy_cookie in a DTLS 1.3 ClientHello");
         }
 
         state.clientHello = clientHello;
